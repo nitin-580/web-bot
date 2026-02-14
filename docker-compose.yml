@@ -13,8 +13,8 @@ services:
       - redis
     volumes:
       - ./screenshots:/app/screenshots
-    environment:
-      - PROXIES=${PROXIES}
+    env_file:
+      - .env
 
   worker:
     build: .
@@ -23,5 +23,5 @@ services:
       - redis
     volumes:
       - ./screenshots:/app/screenshots
-    environment:
-      - PROXIES=${PROXIES}
+    env_file:
+      - .env
