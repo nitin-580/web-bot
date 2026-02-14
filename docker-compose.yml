@@ -1,0 +1,27 @@
+services:
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    command: node src/server.js
+    ports:
+      - "4000:3000"
+    depends_on:
+      - redis
+    volumes:
+      - ./screenshots:/app/screenshots
+    environment:
+      - PROXIES=${PROXIES}
+
+  worker:
+    build: .
+    command: node src/worker.js
+    depends_on:
+      - redis
+    volumes:
+      - ./screenshots:/app/screenshots
+    environment:
+      - PROXIES=${PROXIES}
