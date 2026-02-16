@@ -1,263 +1,299 @@
 const { chromium } = require("playwright");
 const redis = require("../config/redis.config");
-const Job = require("../models/job.model");
 
 async function runBot(productName, targetASIN, jobId) {
   let browser;
-  let sessionId = null;
-  let proxyIP = null;
-  let proxyCountry = null;
+
+  const log = (msg, data = "") => {
+    console.log(`[JOB ${jobId}] ${msg}`, data || "");
+  };
 
   try {
-    console.log("🔥 runBot STARTED");
+    log("🔥 STARTED", { productName, targetASIN });
 
-    const useProxy = true;
-
-    const launchOptions = {
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    };
-
-    // =========================
-    // PROXY SETUP
-    // =========================
-    if (useProxy) {
-      sessionId = Math.random().toString(36).substring(2, 10);
-
-      const proxyUsername =
-        `package-335365-country-in-sessionid-${sessionId}-sessionlength-300`;
-
-      launchOptions.proxy = {
-        server: "http://proxy.soax.com:5000",
-        username: proxyUsername,
-        password: process.env.SOAX_PASSWORD,
-      };
-
-      console.log("🌐 Using Proxy:", proxyUsername);
-    }
-
-    // =========================
-    // UPDATE REDIS → RUNNING
-    // =========================
     await redis.hset(`job:${jobId}`, {
       status: "running",
       startedAt: Date.now(),
     });
 
-    // =========================
-    // CREATE JOB IN MONGO (history starts here)
-    // =========================
-    await Job.create({
-      jobId,
-      productName,
-      targetASIN,
-      sessionId,
-      status: "running",
-      startedAt: new Date(),
+    browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
 
-    browser = await chromium.launch(launchOptions);
-    console.log("🚀 Browser launched");
+    log("🚀 Browser Launched");
 
     const context = await browser.newContext({
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-      locale: "en-IN",
       viewport: { width: 1366, height: 768 },
+      locale: "en-IN",
     });
 
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", {
-        get: () => undefined,
-      });
-    });
-
-    let page = await context.newPage();
-
-    // =========================
-    // CHECK PROXY IP
-    // =========================
-    if (useProxy) {
-      console.log("🧪 Checking Proxy IP...");
-
-      await page.goto("https://ipinfo.io/json", {
-        waitUntil: "domcontentloaded",
-      });
-
-      const ipData = JSON.parse(await page.textContent("body"));
-
-      proxyIP = ipData.ip;
-      proxyCountry = ipData.country;
-
-      console.log("🌍 Proxy IP:", proxyIP);
-      console.log("🌎 Country:", proxyCountry);
-
-      await Job.updateOne(
-        { jobId },
-        {
-          proxyIP,
-          proxyCountry,
-        }
-      );
-    }
+    const page = await context.newPage();
+    log("📄 Page Created");
 
     // =========================
     // OPEN AMAZON
     // =========================
-    console.log("🌍 Opening Amazon...");
     await page.goto("https://www.amazon.in", {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
 
-    await page.waitForSelector("#twotabsearchtextbox", {
-      timeout: 30000,
-    });
-
-    await page.waitForTimeout(2000);
+    await page.waitForSelector("#twotabsearchtextbox");
+    log("✅ Amazon Loaded");
 
     // =========================
-    // SEARCH
+    // SEARCH (Human Typing)
     // =========================
-    console.log("🔎 Searching...");
-    await page.fill("#twotabsearchtextbox", productName);
-    await page.keyboard.press("Enter");
+    await page.click("#twotabsearchtextbox");
 
-    await page.waitForLoadState("domcontentloaded");
-    await page.waitForTimeout(4000);
+for (let char of productName) {
+  await page.keyboard.type(char, {
+    delay: 80 + Math.random() * 120,
+  });
+}
 
-    if ((await page.locator("text=Robot Check").count()) > 0) {
-      throw new Error("Amazon Robot Check Triggered");
-    }
+await page.keyboard.press("Enter");
 
-    // =========================
-    // FIND PRODUCT
-    // =========================
-    await page.waitForSelector("a[href*='/dp/']", {
-      timeout: 30000,
-    });
+await page.waitForLoadState("domcontentloaded");
+await page.waitForTimeout(4000);
 
-    const productLinks = page.locator("a[href*='/dp/']");
-    const linkCount = await productLinks.count();
+log("📦 Search Results Loaded");
 
-    let found = false;
-    let rankPosition = null;
+let rankPosition = null;
+let activePage = page;
+let found = false;
 
-    for (let i = 0; i < linkCount; i++) {
-      const link = productLinks.nth(i);
-      const href = await link.getAttribute("href");
+let currentPage = 1;
+const maxPages = 5;
 
-      if (!href) continue;
+while (currentPage <= maxPages && !found) {
 
-      if (href.includes(targetASIN)) {
-        rankPosition = i + 1;
+  log(`📄 Scanning Page ${currentPage}`);
 
-        const newPagePromise = context.waitForEvent("page");
-        await link.click();
-        const newPage = await newPagePromise;
+  const results = page.locator(
+    'div[data-component-type="s-search-result"]'
+  );
 
-        await newPage.waitForLoadState("domcontentloaded");
-        await newPage.waitForSelector("#productTitle");
+  const count = await results.count();
+  log("🔢 Products Found", { count });
 
-        page = newPage;
-        found = true;
-        break;
+  for (let i = 0; i < count; i++) {
+    const item = results.nth(i);
+    const asin = await item.getAttribute("data-asin");
+
+    if (!asin || asin.trim() === "") continue;
+
+    // Scroll like human while scanning
+    await item.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(400 + Math.random() * 700);
+
+    if (asin === targetASIN) {
+
+      // Global rank across pages
+      rankPosition = ((currentPage - 1) * count) + (i + 1);
+
+      log("🎯 ASIN MATCHED", { rankPosition });
+
+      // Try multiple link selectors
+      let link = item.locator('a[href*="/dp/"]').first();
+
+      if ((await link.count()) === 0) {
+        link = item.locator(".s-product-image-container a").first();
       }
-    }
 
-    if (!found) {
-      await Job.updateOne(
-        { jobId },
-        {
-          status: "failed",
-          error: "ASIN not found",
-          finishedAt: new Date(),
-        }
-      );
+      if ((await link.count()) === 0) {
+        link = item.locator("h2 a").first();
+      }
 
-      await redis.hset(`job:${jobId}`, {
-        status: "failed",
-        error: "ASIN not found",
-        finishedAt: Date.now(),
+      if ((await link.count()) === 0) {
+        throw new Error("ASIN matched but product link missing");
+      }
+
+      // ---- ENHANCED HOVER BEFORE CLICK ----
+      await link.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(500);
+
+      const box = await link.boundingBox();
+
+      if (box) {
+        await page.mouse.move(
+          box.x + box.width / 2 + (Math.random() * 8 - 4),
+          box.y + box.height / 2 + (Math.random() * 8 - 4),
+          { steps: 15 }
+        );
+      }
+
+      await link.hover();
+      await page.waitForTimeout(800 + Math.random() * 1200);
+
+      const newPagePromise = context
+        .waitForEvent("page")
+        .catch(() => null);
+
+      await link.click({ delay: 120 + Math.random() * 80 });
+
+      const newPage = await newPagePromise;
+
+      if (newPage) {
+        log("🆕 New Tab Opened");
+        activePage = newPage;
+        await activePage.waitForLoadState("domcontentloaded");
+      } else {
+        log("📄 Same Tab Navigation");
+        await page.waitForLoadState("domcontentloaded");
+      }
+
+      log("🔗 Final URL", activePage.url());
+
+      await activePage.waitForSelector("#productTitle", {
+        timeout: 30000,
       });
 
-      return;
+      log("🛍 Product Page Confirmed");
+
+      found = true;
+      break;
     }
+  }
+
+  // Move to next page if not found
+  if (!found) {
+    const nextButton = page.locator("a.s-pagination-next");
+
+    if ((await nextButton.count()) > 0) {
+      log("➡ Moving To Next Page");
+
+      await nextButton.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(800);
+
+      await nextButton.click({ delay: 100 });
+
+      await page.waitForLoadState("domcontentloaded");
+      await page.waitForTimeout(3000);
+
+      currentPage++;
+    } else {
+      log("❌ No More Pages Available");
+      break;
+    }
+  }
+}
+
+if (!found) {
+  throw new Error(
+    `ASIN ${targetASIN} not found in first ${maxPages} pages`
+  );
+}
+    // =========================
+    // HUMAN SIMULATION ON PRODUCT PAGE
+    // =========================
+    log("🧠 Simulating 50s Human Behaviour");
+
+const start = Date.now();
+const minDuration = 50000; // 50 seconds
+
+while (Date.now() - start < minDuration) {
+
+  // Random mouse move
+  await activePage.mouse.move(
+    Math.random() * 1200,
+    Math.random() * 800,
+    { steps: 15 }
+  );
+
+  // Random scroll
+  await activePage.evaluate(() => {
+    window.scrollBy(0, Math.random() * 600 - 300);
+  });
+
+  // Random pause (like reading)
+  await activePage.waitForTimeout(
+    1500 + Math.random() * 4000
+  );
+
+  // Occasionally hover image
+  if (Math.random() > 0.7) {
+    const image = activePage.locator("#landingImage");
+    if (await image.count()) {
+      await image.hover();
+      await activePage.waitForTimeout(2000);
+    }
+  }
+
+}
 
     // =========================
-    // HUMAN SIMULATION
-    // =========================
-    const start = Date.now();
-    while (Date.now() - start < 10000) {
-      await page.mouse.move(
-        Math.random() * 1200,
-        Math.random() * 800
-      );
-      await page.waitForTimeout(1000);
-    }
-
-    // =========================
-    // GET PRICE
+    // EXTRACT PRICE
     // =========================
     let price = "N/A";
     try {
-      price = await page
+      price = await activePage
         .locator(".a-price .a-offscreen")
         .first()
         .textContent();
     } catch {}
 
+    log("💰 Price", { price });
+
     // =========================
-    // SUCCESS
+    // ADD TO CART (Human Click)
     // =========================
-    await Job.updateOne(
-      { jobId },
-      {
-        status: "completed",
-        rankPosition,
-        price,
-        finishedAt: new Date(),
+    try {
+      const addToCart = activePage.locator("#add-to-cart-button");
+
+      if ((await addToCart.count()) > 0) {
+        await addToCart.hover();
+        await activePage.waitForTimeout(800);
+        await addToCart.click({ delay: 120 });
+        log("🛒 Added To Cart");
+      } else {
+        log("⚠ Add To Cart Not Available");
       }
-    );
+    } catch {
+      log("⚠ Add To Cart Failed");
+    }
+
+    // =========================
+    // SCREENSHOT
+    // =========================
+    const screenshotPath = `/app/screenshots/job-${jobId}.png`;
+
+    await activePage.screenshot({
+      path: screenshotPath,
+      fullPage: true,
+    });
+
+    log("📸 Screenshot Saved");
 
     await redis.hset(`job:${jobId}`, {
       status: "completed",
       rankPosition,
       price,
+      url: activePage.url(),
+      screenshot: screenshotPath,
       finishedAt: Date.now(),
     });
 
-    console.log("🔥 SUCCESS");
+    log("🔥 SUCCESS");
 
   } catch (err) {
-    console.error("❌ ERROR:", err.message);
-
-    await Job.updateOne(
-      { jobId },
-      {
-        status: "failed",
-        error: err.message,
-        finishedAt: new Date(),
-      }
-    );
+    log("❌ ERROR", err.message);
 
     await redis.hset(`job:${jobId}`, {
       status: "failed",
       error: err.message,
-      finishedAt: Date.now(),
+      failedAt: Date.now(),
     });
-
   } finally {
     if (browser) {
       await browser.close();
-      console.log("🛑 Browser closed");
+      log("🛑 Browser Closed");
     }
-
-    // =========================
-    // OPTIONAL: CLEAN REDIS AFTER FINISH
-    // =========================
-    await redis.zrem("jobs", jobId);
   }
 }
 
 module.exports = runBot;
+
