@@ -2,6 +2,13 @@ const { Worker } = require("bullmq");
 const { connection } = require("./queue");
 const redis = require("./config/redis.config");
 const runBot = require("./bot/surfBot");
+const connectMongo = require("./config/mongo.config");
+
+// 🔥 CONNECT TO MONGO FIRST
+(async () => {
+  await connectMongo();
+  console.log("✅ Worker connected to MongoDB");
+})();
 
 const worker = new Worker(
   "surfQueue",

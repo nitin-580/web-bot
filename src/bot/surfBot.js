@@ -1,8 +1,12 @@
 const { chromium } = require("playwright");
 const redis = require("../config/redis.config");
+const Job = require("../models/job.model");
 
 async function runBot(productName, targetASIN, jobId) {
   let browser;
+  let sessionId = null;
+  let proxyIP = null;
+  let proxyCountry = null;
 
   try {
     console.log("🔥 runBot STARTED");
@@ -14,8 +18,11 @@ async function runBot(productName, targetASIN, jobId) {
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     };
 
+    // =========================
+    // PROXY SETUP
+    // =========================
     if (useProxy) {
-      const sessionId = Math.random().toString(36).substring(2, 10);
+      sessionId = Math.random().toString(36).substring(2, 10);
 
       const proxyUsername =
         `package-335365-country-in-sessionid-${sessionId}-sessionlength-300`;
@@ -28,6 +35,26 @@ async function runBot(productName, targetASIN, jobId) {
 
       console.log("🌐 Using Proxy:", proxyUsername);
     }
+
+    // =========================
+    // UPDATE REDIS → RUNNING
+    // =========================
+    await redis.hset(`job:${jobId}`, {
+      status: "running",
+      startedAt: Date.now(),
+    });
+
+    // =========================
+    // CREATE JOB IN MONGO (history starts here)
+    // =========================
+    await Job.create({
+      jobId,
+      productName,
+      targetASIN,
+      sessionId,
+      status: "running",
+      startedAt: new Date(),
+    });
 
     browser = await chromium.launch(launchOptions);
     console.log("🚀 Browser launched");
@@ -48,7 +75,7 @@ async function runBot(productName, targetASIN, jobId) {
     let page = await context.newPage();
 
     // =========================
-    // VERIFY PROXY IP
+    // CHECK PROXY IP
     // =========================
     if (useProxy) {
       console.log("🧪 Checking Proxy IP...");
@@ -59,9 +86,19 @@ async function runBot(productName, targetASIN, jobId) {
 
       const ipData = JSON.parse(await page.textContent("body"));
 
-      console.log("🌍 Proxy IP:", ipData.ip);
-      console.log("🌎 Country:", ipData.country);
-      console.log("🏢 ISP:", ipData.org);
+      proxyIP = ipData.ip;
+      proxyCountry = ipData.country;
+
+      console.log("🌍 Proxy IP:", proxyIP);
+      console.log("🌎 Country:", proxyCountry);
+
+      await Job.updateOne(
+        { jobId },
+        {
+          proxyIP,
+          proxyCountry,
+        }
+      );
     }
 
     // =========================
@@ -94,7 +131,7 @@ async function runBot(productName, targetASIN, jobId) {
     }
 
     // =========================
-    // FIND PRODUCT USING /dp/
+    // FIND PRODUCT
     // =========================
     await page.waitForSelector("a[href*='/dp/']", {
       timeout: 30000,
@@ -102,8 +139,6 @@ async function runBot(productName, targetASIN, jobId) {
 
     const productLinks = page.locator("a[href*='/dp/']");
     const linkCount = await productLinks.count();
-
-    console.log("Links found:", linkCount);
 
     let found = false;
     let rankPosition = null;
@@ -115,25 +150,14 @@ async function runBot(productName, targetASIN, jobId) {
       if (!href) continue;
 
       if (href.includes(targetASIN)) {
-        console.log("✅ ASIN FOUND IN URL");
         rankPosition = i + 1;
 
-        await link.scrollIntoViewIfNeeded();
-        await page.waitForTimeout(1500);
-
         const newPagePromise = context.waitForEvent("page");
-
         await link.click();
-
         const newPage = await newPagePromise;
 
         await newPage.waitForLoadState("domcontentloaded");
-
-        await newPage.waitForSelector("#productTitle", {
-          timeout: 30000,
-        });
-
-        console.log("✅ Product page loaded");
+        await newPage.waitForSelector("#productTitle");
 
         page = newPage;
         found = true;
@@ -142,39 +166,38 @@ async function runBot(productName, targetASIN, jobId) {
     }
 
     if (!found) {
+      await Job.updateOne(
+        { jobId },
+        {
+          status: "failed",
+          error: "ASIN not found",
+          finishedAt: new Date(),
+        }
+      );
+
       await redis.hset(`job:${jobId}`, {
-        status: "not_found",
+        status: "failed",
+        error: "ASIN not found",
         finishedAt: Date.now(),
       });
+
       return;
     }
 
     // =========================
     // HUMAN SIMULATION
     // =========================
-    console.log("Simulating Human Behaiviour")
     const start = Date.now();
-    while (Date.now() - start < 15000) {
+    while (Date.now() - start < 10000) {
       await page.mouse.move(
         Math.random() * 1200,
         Math.random() * 800
       );
-      await page.waitForTimeout(1200);
+      await page.waitForTimeout(1000);
     }
 
     // =========================
-    // ADD TO CART
-    // =========================
-    try {
-      await page.waitForSelector("#add-to-cart-button", {
-        timeout: 15000,
-      });
-      await page.click("#add-to-cart-button");
-      console.log("🛒 Added to cart");
-    } catch {}
-
-    // =========================
-    // EXTRACT PRICE
+    // GET PRICE
     // =========================
     let price = "N/A";
     try {
@@ -184,18 +207,23 @@ async function runBot(productName, targetASIN, jobId) {
         .textContent();
     } catch {}
 
-    const screenshotPath = `/tmp/product-${jobId}.png`;
-
-    await page.screenshot({
-      path: screenshotPath,
-      fullPage: true,
-    });
+    // =========================
+    // SUCCESS
+    // =========================
+    await Job.updateOne(
+      { jobId },
+      {
+        status: "completed",
+        rankPosition,
+        price,
+        finishedAt: new Date(),
+      }
+    );
 
     await redis.hset(`job:${jobId}`, {
       status: "completed",
       rankPosition,
       price,
-      screenshot: screenshotPath,
       finishedAt: Date.now(),
     });
 
@@ -204,10 +232,19 @@ async function runBot(productName, targetASIN, jobId) {
   } catch (err) {
     console.error("❌ ERROR:", err.message);
 
+    await Job.updateOne(
+      { jobId },
+      {
+        status: "failed",
+        error: err.message,
+        finishedAt: new Date(),
+      }
+    );
+
     await redis.hset(`job:${jobId}`, {
       status: "failed",
       error: err.message,
-      failedAt: Date.now(),
+      finishedAt: Date.now(),
     });
 
   } finally {
@@ -215,6 +252,11 @@ async function runBot(productName, targetASIN, jobId) {
       await browser.close();
       console.log("🛑 Browser closed");
     }
+
+    // =========================
+    // OPTIONAL: CLEAN REDIS AFTER FINISH
+    // =========================
+    await redis.zrem("jobs", jobId);
   }
 }
 

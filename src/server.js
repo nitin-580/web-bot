@@ -9,6 +9,9 @@ const statsRoutes = require("./routes/statsRoutes");
 const app = express();
 app.use(express.json());
 
+const connectMongo = require("./config/mongo.config");
+connectMongo();
+
 // -------------------
 // Redis Connection
 // -------------------

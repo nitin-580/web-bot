@@ -2,40 +2,38 @@ const express = require("express");
 const router = express.Router();
 const { surfQueue } = require("../queue");
 const redis = require("../config/redis.config");
+const Job = require("../models/job.model");
 
 /**
- * 🔎 Create Amazon Search Job
+ * 🔎 Create Amazon Search Job (Single or Batch)
  */
 router.post("/amazon/search", async (req, res) => {
-  const { productName, targetASIN } = req.body;
+  const { productName, targetASIN, count = 1 } = req.body;
 
-  if (!productName || !targetASIN) {
-    return res.status(400).json({
-      error: "productName and targetASIN required",
+  const created = [];
+
+  for (let i = 0; i < count; i++) {
+    const job = await surfQueue.add("amazonSearch", {
+      productName,
+      targetASIN,
     });
+
+    await redis.hset(`job:${job.id}`, {
+      status: "waiting",
+      productName,
+      targetASIN,
+      createdAt: Date.now(),
+    });
+
+    await redis.zadd("jobs", Date.now(), job.id);
+
+    created.push(job.id);
   }
 
-  const job = await surfQueue.add("amazonSearch", {
-    productName,
-    targetASIN,
-  });
-
-  await redis.hset(`job:${job.id}`, {
-    status: "waiting",
-    productName,
-    targetASIN,
-    createdAt: Date.now(),
-  });
-
-  res.json({
-    message: "Amazon search job created",
-    jobId: job.id,
-  });
+  res.json({ jobIds: created });
 });
-
-
 /**
- * 📄 Get Job By ID
+ * 📄 Get Job By ID (Redis fast lookup)
  */
 router.get("/job/:id", async (req, res) => {
   const job = await redis.hgetall(`job:${req.params.id}`);
@@ -47,9 +45,8 @@ router.get("/job/:id", async (req, res) => {
   res.json(job);
 });
 
-
 /**
- * 📋 Get Last 50 Jobs (Production Safe)
+ * 📋 Get Last 50 Jobs (Redis)
  */
 router.get("/jobs", async (req, res) => {
   const jobIds = await redis.zrevrange("jobs", 0, 49);
@@ -62,6 +59,44 @@ router.get("/jobs", async (req, res) => {
   }
 
   res.json(jobs);
+});
+
+/**
+ * 📜 Full Job History (MongoDB)
+ */
+router.get("/jobs/history", async (req, res) => {
+  const jobs = await Job.find()
+    .sort({ startedAt: -1 })
+    .limit(100);
+
+  res.json(jobs);
+});
+
+/**
+ * 📊 Analytics Endpoint
+ */
+router.get("/jobs/analytics", async (req, res) => {
+  const total = await Job.countDocuments();
+  const completed = await Job.countDocuments({ status: "completed" });
+  const failed = await Job.countDocuments({ status: "failed" });
+  const running = await Job.countDocuments({ status: "running" });
+
+  const successRate = total
+    ? ((completed / total) * 100).toFixed(2)
+    : 0;
+
+  const failureRate = total
+    ? ((failed / total) * 100).toFixed(2)
+    : 0;
+
+  res.json({
+    total,
+    completed,
+    failed,
+    running,
+    successRate: `${successRate}%`,
+    failureRate: `${failureRate}%`,
+  });
 });
 
 module.exports = router;
