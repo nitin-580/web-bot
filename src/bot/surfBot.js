@@ -6,13 +6,8 @@ async function runBot(productName, targetASIN, jobId) {
 
   try {
     console.log("🔥 runBot STARTED");
-    console.log("Product:", productName);
-    console.log("Target ASIN:", targetASIN);
 
-    // =========================
-    // PROXY TOGGLE
-    // =========================
-    const useProxy = false; // change to true when using proxy
+    const useProxy = true;
 
     const launchOptions = {
       headless: true,
@@ -20,12 +15,18 @@ async function runBot(productName, targetASIN, jobId) {
     };
 
     if (useProxy) {
+      const sessionId = Math.random().toString(36).substring(2, 10);
+
+      const proxyUsername =
+        `package-335365-country-in-sessionid-${sessionId}-sessionlength-300`;
+
       launchOptions.proxy = {
         server: "http://proxy.soax.com:5000",
-        username: process.env.SOAX_USERNAME,
+        username: proxyUsername,
         password: process.env.SOAX_PASSWORD,
       };
-      console.log("🌐 Using Proxy:", process.env.SOAX_USERNAME);
+
+      console.log("🌐 Using Proxy:", proxyUsername);
     }
 
     browser = await chromium.launch(launchOptions);
@@ -38,7 +39,6 @@ async function runBot(productName, targetASIN, jobId) {
       viewport: { width: 1366, height: 768 },
     });
 
-    // Basic stealth
     await context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", {
         get: () => undefined,
@@ -46,6 +46,23 @@ async function runBot(productName, targetASIN, jobId) {
     });
 
     let page = await context.newPage();
+
+    // =========================
+    // VERIFY PROXY IP
+    // =========================
+    if (useProxy) {
+      console.log("🧪 Checking Proxy IP...");
+
+      await page.goto("https://ipinfo.io/json", {
+        waitUntil: "domcontentloaded",
+      });
+
+      const ipData = JSON.parse(await page.textContent("body"));
+
+      console.log("🌍 Proxy IP:", ipData.ip);
+      console.log("🌎 Country:", ipData.country);
+      console.log("🏢 ISP:", ipData.org);
+    }
 
     // =========================
     // OPEN AMAZON
@@ -72,9 +89,6 @@ async function runBot(productName, targetASIN, jobId) {
     await page.waitForLoadState("domcontentloaded");
     await page.waitForTimeout(4000);
 
-    console.log("📄 Current URL:", page.url());
-
-    // Robot check detection
     if ((await page.locator("text=Robot Check").count()) > 0) {
       throw new Error("Amazon Robot Check Triggered");
     }
@@ -107,15 +121,11 @@ async function runBot(productName, targetASIN, jobId) {
         await link.scrollIntoViewIfNeeded();
         await page.waitForTimeout(1500);
 
-        console.log("🖱 Clicking product (new tab expected)");
-
         const newPagePromise = context.waitForEvent("page");
 
         await link.click();
 
         const newPage = await newPagePromise;
-
-        console.log("🆕 New tab opened");
 
         await newPage.waitForLoadState("domcontentloaded");
 
@@ -123,7 +133,7 @@ async function runBot(productName, targetASIN, jobId) {
           timeout: 30000,
         });
 
-        console.log("✅ Product page loaded:", newPage.url());
+        console.log("✅ Product page loaded");
 
         page = newPage;
         found = true;
@@ -132,29 +142,24 @@ async function runBot(productName, targetASIN, jobId) {
     }
 
     if (!found) {
-      console.log("❌ ASIN not found");
-
       await redis.hset(`job:${jobId}`, {
         status: "not_found",
         finishedAt: Date.now(),
       });
-
       return;
     }
 
     // =========================
     // HUMAN SIMULATION
     // =========================
-    console.log("📦 Product opened");
-    console.log("🏆 Rank Position:", rankPosition);
-
+    console.log("Simulating Human Behaiviour")
     const start = Date.now();
-    while (Date.now() - start < 20000) {
+    while (Date.now() - start < 15000) {
       await page.mouse.move(
         Math.random() * 1200,
         Math.random() * 800
       );
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(1200);
     }
 
     // =========================
@@ -164,14 +169,9 @@ async function runBot(productName, targetASIN, jobId) {
       await page.waitForSelector("#add-to-cart-button", {
         timeout: 15000,
       });
-
       await page.click("#add-to-cart-button");
       console.log("🛒 Added to cart");
-
-      await page.waitForTimeout(3000);
-    } catch {
-      console.log("⚠ Add to cart not found");
-    }
+    } catch {}
 
     // =========================
     // EXTRACT PRICE
@@ -182,12 +182,8 @@ async function runBot(productName, targetASIN, jobId) {
         .locator(".a-price .a-offscreen")
         .first()
         .textContent();
-      console.log("💰 Price:", price);
     } catch {}
 
-    // =========================
-    // SCREENSHOT
-    // =========================
     const screenshotPath = `/tmp/product-${jobId}.png`;
 
     await page.screenshot({
@@ -195,11 +191,6 @@ async function runBot(productName, targetASIN, jobId) {
       fullPage: true,
     });
 
-    console.log("📸 Screenshot saved");
-
-    // =========================
-    // SAVE TO REDIS
-    // =========================
     await redis.hset(`job:${jobId}`, {
       status: "completed",
       rankPosition,
@@ -208,7 +199,7 @@ async function runBot(productName, targetASIN, jobId) {
       finishedAt: Date.now(),
     });
 
-    console.log("🔥 runBot FINISHED SUCCESSFULLY");
+    console.log("🔥 SUCCESS");
 
   } catch (err) {
     console.error("❌ ERROR:", err.message);
