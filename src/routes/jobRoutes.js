@@ -4,31 +4,38 @@ const { surfQueue } = require("../queue");
 const redis = require("../config/redis.config");
 
 /**
- * Add job
+ * 🔎 Create Amazon Search Job
  */
-router.post("/surf", async (req, res) => {
-  const { url } = req.body;
+router.post("/amazon/search", async (req, res) => {
+  const { productName, targetASIN } = req.body;
 
-  if (!url || !url.startsWith("http")) {
-    return res.status(400).json({ error: "Invalid URL" });
+  if (!productName || !targetASIN) {
+    return res.status(400).json({
+      error: "productName and targetASIN required",
+    });
   }
 
-  const job = await surfQueue.add("surfJob", { url });
+  const job = await surfQueue.add("amazonSearch", {
+    productName,
+    targetASIN,
+  });
 
   await redis.hset(`job:${job.id}`, {
     status: "waiting",
-    url,
+    productName,
+    targetASIN,
     createdAt: Date.now(),
   });
 
   res.json({
-    message: "Job added",
+    message: "Amazon search job created",
     jobId: job.id,
   });
 });
 
+
 /**
- * Get job by ID
+ * 📄 Get Job By ID
  */
 router.get("/job/:id", async (req, res) => {
   const job = await redis.hgetall(`job:${req.params.id}`);
@@ -40,19 +47,18 @@ router.get("/job/:id", async (req, res) => {
   res.json(job);
 });
 
+
 /**
- * List last 50 jobs
+ * 📋 Get Last 50 Jobs (Production Safe)
  */
 router.get("/jobs", async (req, res) => {
-  const keys = await redis.keys("job:*");
+  const jobIds = await redis.zrevrange("jobs", 0, 49);
 
   const jobs = [];
-  for (const key of keys.slice(-50)) {
-    const data = await redis.hgetall(key);
-    jobs.push({
-      id: key.split(":")[1],
-      ...data,
-    });
+
+  for (const id of jobIds) {
+    const data = await redis.hgetall(`job:${id}`);
+    jobs.push({ id, ...data });
   }
 
   res.json(jobs);
