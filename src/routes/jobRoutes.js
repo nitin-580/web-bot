@@ -13,11 +13,22 @@ router.post("/amazon/search", async (req, res) => {
   const created = [];
 
   for (let i = 0; i < count; i++) {
+
     const job = await surfQueue.add("amazonSearch", {
       productName,
       targetASIN,
     });
 
+    // ✅ CREATE MONGO DOCUMENT HERE
+    await Job.create({
+      jobId: job.id,
+      productName,
+      targetASIN,
+      status: "waiting",
+      createdAt: new Date(),
+    });
+
+    // Redis storage
     await redis.hset(`job:${job.id}`, {
       status: "waiting",
       productName,
@@ -65,11 +76,17 @@ router.get("/jobs", async (req, res) => {
  * 📜 Full Job History (MongoDB)
  */
 router.get("/jobs/history", async (req, res) => {
-  const jobs = await Job.find()
-    .sort({ startedAt: -1 })
-    .limit(100);
+  try {
+    const jobs = await Job.find()
+      .sort({ startedAt: -1 })
+      .limit(100)
+      .lean(); // performance improvement
 
-  res.json(jobs);
+    res.json(jobs);
+  } catch (err) {
+    console.error("History fetch failed:", err);
+    res.status(500).json({ error: "Failed to fetch history" });
+  }
 });
 
 /**
@@ -97,6 +114,20 @@ router.get("/jobs/analytics", async (req, res) => {
     successRate: `${successRate}%`,
     failureRate: `${failureRate}%`,
   });
+});
+
+router.get("/jobs/:id/logs", async (req, res) => {
+  try {
+    const logs = await redis.lrange(
+      `job:${req.params.id}:logs`,
+      0,
+      -1
+    );
+
+    res.json(logs || []);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch logs" });
+  }
 });
 
 module.exports = router;

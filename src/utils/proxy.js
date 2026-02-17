@@ -1,22 +1,37 @@
-function parseProxy(proxyString) {
-    const url = new URL(proxyString);
-  
-    return {
-      server: `${url.protocol}//${url.hostname}:${url.port}`,
-      username: url.username || undefined,
-      password: url.password || undefined,
-    };
-  }
-  
-  function getRandomProxy() {
-    const proxies = process.env.PROXIES
-      ? process.env.PROXIES.split(",")
-      : [];
-  
-    if (!proxies.length) return null;
-  
-    const random = proxies[Math.floor(Math.random() * proxies.length)];
-    return parseProxy(random);
-  }
-  
-  module.exports = { getRandomProxy };
+const redis = require("../config/redis.config");
+
+const LIVE_TTL = 120; // 2 minutes safety
+
+async function markProxyBusy(proxyId, jobId) {
+  await redis.hset(`proxy:live:${proxyId}`, {
+    status: "busy",
+    jobId,
+    startedAt: Date.now(),
+    currentPing: 0,
+  });
+
+  await redis.expire(`proxy:live:${proxyId}`, LIVE_TTL);
+}
+
+async function updateLivePing(proxyId, ping) {
+  await redis.hset(`proxy:live:${proxyId}`, {
+    currentPing: ping,
+  });
+
+  await redis.expire(`proxy:live:${proxyId}`, LIVE_TTL);
+}
+
+async function markProxyIdle(proxyId) {
+  await redis.hset(`proxy:live:${proxyId}`, {
+    status: "idle",
+    currentPing: 0,
+  });
+
+  await redis.expire(`proxy:live:${proxyId}`, LIVE_TTL);
+}
+
+module.exports = {
+  markProxyBusy,
+  updateLivePing,
+  markProxyIdle,
+};

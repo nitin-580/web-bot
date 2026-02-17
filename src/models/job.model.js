@@ -1,9 +1,14 @@
 const mongoose = require("mongoose");
 
 const jobSchema = new mongoose.Schema({
-  jobId: String,
+    jobId: {
+        type: String,
+        required: true,
+        unique: true,
+      },
   productName: String,
   targetASIN: String,
+
 
   proxyIP: String,
   proxyCountry: String,
@@ -11,7 +16,8 @@ const jobSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ["running", "completed", "failed"],
+    enum: ["waiting", "running", "completed", "failed"],
+    default: "waiting",
   },
 
   error: String,

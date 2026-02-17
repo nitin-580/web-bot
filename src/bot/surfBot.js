@@ -1,5 +1,6 @@
 const { chromium } = require("playwright");
 const redis = require("../config/redis.config");
+// const updateProxyStats = require("../utils/proxy");
 
 async function runBot(productName, targetASIN, jobId) {
   let browser;
@@ -9,6 +10,8 @@ async function runBot(productName, targetASIN, jobId) {
   };
 
   try {
+    const start = Date.now();
+
     log("🔥 STARTED", { productName, targetASIN });
 
     await redis.hset(`job:${jobId}`, {
@@ -36,10 +39,19 @@ async function runBot(productName, targetASIN, jobId) {
     // =========================
     // OPEN AMAZON
     // =========================
+
     await page.goto("https://www.amazon.in", {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
+
+    const ping = Date.now() - start;
+
+    // 🔥 Update stats via utility function
+    // await updateProxyStats(proxy.id, {
+    //   success: true,
+    //   ping,
+    // });
 
     await page.waitForSelector("#twotabsearchtextbox");
     log("✅ Amazon Loaded");
@@ -192,7 +204,6 @@ if (!found) {
     // =========================
     log("🧠 Simulating 50s Human Behaviour");
 
-const start = Date.now();
 const minDuration = 50000; // 50 seconds
 
 while (Date.now() - start < minDuration) {
@@ -216,13 +227,25 @@ while (Date.now() - start < minDuration) {
 
   // Occasionally hover image
   if (Math.random() > 0.7) {
-    const image = activePage.locator("#landingImage");
-    if (await image.count()) {
-      await image.hover();
-      await activePage.waitForTimeout(2000);
+    try {
+      const image = activePage.locator("#landingImage");
+  
+      if (await image.count()) {
+        const isVisible = await image.isVisible().catch(() => false);
+  
+        if (isVisible) {
+          await image.scrollIntoViewIfNeeded();
+          await activePage.waitForTimeout(500);
+  
+          await image.hover({ timeout: 3000 }).catch(() => null);
+  
+          await activePage.waitForTimeout(1000);
+        }
+      }
+    } catch (err) {
+      log("⚠ Image Hover Skipped");
     }
   }
-
 }
 
     // =========================
@@ -297,3 +320,4 @@ while (Date.now() - start < minDuration) {
 
 module.exports = runBot;
 
+   
